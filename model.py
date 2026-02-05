@@ -36,22 +36,22 @@ class SpecklePINN(nn.Module):
         )
 
         # === 核心物理参数头 ===
-        self.head_tau = nn.Linear(hidden_dim // 2, 1)  # 流速衰减时间
+        self.head_tau = nn.Linear(hidden_dim // 2, 1)   # 流速衰减时间
         self.head_beta = nn.Linear(hidden_dim // 2, 1)  # 仪器反差因子
-        self.head_alpha = nn.Linear(hidden_dim // 2, 1)  # 衰减指数 (1.0~2.0)
+        self.head_alpha = nn.Linear(hidden_dim // 2, 1) # 衰减指数 (1.0~2.0)
 
         # === 🔥 新增：混合模型参数头 (修复报错的关键) ===
         # 1. 静态散射占比 rho (0~1)
         self.head_rho = nn.Linear(hidden_dim // 2, 1)
-
+        
         # 2. 132Hz 结构化噪声建模
         # 振幅 A 和 相位 phi
         self.head_noise_amp = nn.Linear(hidden_dim // 2, 1)
-
+        self.head_noise_phi = nn.Linear(hidden_dim // 2, 1)
 
         # 初始化 bias，让训练初期更稳定
         nn.init.constant_(self.head_tau.bias, 0.0)
-        nn.init.constant_(self.head_rho.bias, -2.0)  # 初始 rho 偏小 (sigmoid后约0.1)
+        nn.init.constant_(self.head_rho.bias, -2.0) # 初始 rho 偏小 (sigmoid后约0.1)
 
     def forward(self, g2_curve, aux_input, m_value):
         x = torch.cat([g2_curve, aux_input], dim=1)
@@ -63,25 +63,25 @@ class SpecklePINN(nn.Module):
 
         # Beta: 0~1
         beta = torch.sigmoid(self.head_beta(feat))
-
+        
         # Alpha: 1.0 (布朗) ~ 2.0 (定向流)
         alpha = torch.sigmoid(self.head_alpha(feat)) + 1.0
 
         # 🔥 Rho: 动态光占比 (0~1)
-        rho = torch.ones_like(beta)
+        rho = torch.sigmoid(self.head_rho(feat))
 
         # 🔥 Noise: 132Hz 噪声参数
-        noise_amp = torch.sigmoid(self.head_noise_amp(feat)) * 0.1
-
+        noise_amp = torch.sigmoid(self.head_noise_amp(feat)) * 0.2 # 限制最大振幅 0.2
+        noise_phi = torch.sigmoid(self.head_noise_phi(feat)) * 2 * np.pi
 
         # --- 2. 物理模型生成 (Mixed Model) ---
-        t = self.tau_grid.unsqueeze(0) + 1e-9  # [1, N_lags]
+        t = self.tau_grid.unsqueeze(0) + 1e-9 # [1, N_lags]
 
         # 动态部分 g1 (High Frequency)
         term = t / tau_c
         exponent = -2.0 * (term ** alpha)
-        exponent = torch.clamp(exponent, min=-20.0, max=0.0)  # 防止数值不稳定
-        g1_dynamic = torch.exp(exponent / 2.0)  # 注意: Siegert关系里是 |g1|^2，这里先算 g1
+        exponent = torch.clamp(exponent, min=-20.0, max=0.0) # 防止数值不稳定
+        g1_dynamic = torch.exp(exponent / 2.0) # 注意: Siegert关系里是 |g1|^2，这里先算 g1
 
         # 混合场 g1 (Heterodyne mixing)
         # static part = 1.0
@@ -92,7 +92,7 @@ class SpecklePINN(nn.Module):
 
         # --- 3. 添加 132Hz 周期噪声 ---
         omega = 2 * np.pi * 132.0
-        noise_term = 0.0
+        noise_term = noise_amp * torch.cos(omega * t + noise_phi)
 
         # 最终重构的 g2
         g2_hat = g2_physics + noise_term
@@ -105,7 +105,7 @@ class SpecklePINN(nn.Module):
             'tau_c': tau_c,
             'beta': beta,
             'alpha': alpha,
-            'rho': rho,  # 返回 rho 供分析
+            'rho': rho,         # 返回 rho 供分析
             'g2_hat': g2_hat,
             'v_pred': v_pred
         }
